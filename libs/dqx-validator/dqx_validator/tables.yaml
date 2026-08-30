@@ -1,0 +1,26 @@
+# Table configuration for the DQX validator.
+#
+# Everything here is resolved per-env at runtime: Validator(env=<env>) fills
+# {env} into the names below. No environment defaults are baked into the code;
+# callers must pass env explicitly (from a job / notebook parameter).
+#
+# This file is bundled inside the wheel. To change a name, edit here and
+# rebuild the wheel.
+
+# Catalog naming convention; {env} is substituted at runtime.
+# Examples: "main" (one catalog for all envs), "{env}" (catalog per env named
+# dev/prod/…), "acme_{env}". Edit for your org and rebuild the wheel.
+catalog_template: "main"
+
+# The rules / universal-rules tables live in a different schema per env.
+rules_schema:
+  prod: dqx_studio
+  non_prod: dqx_app
+
+# Quarantine schema (quarantine table FQN is <catalog>.<quarantine_schema>).
+quarantine_schema: quarantine
+
+# Unqualified table names (catalog + schema are prepended per env).
+table_names:
+  rules: dq_quality_rules
+  universal_rules: dq_universal_quality_rules

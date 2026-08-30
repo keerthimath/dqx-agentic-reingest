@@ -1,0 +1,92 @@
+# ============================================================================
+# REMEDIATION PLAYBOOK — sample / template
+# ============================================================================
+#
+# Real playbooks live in a Volume, ONE FILE PER DATASET, not in this repo:
+#
+#   /Volumes/<catalog>/<governance_schema>/remediation_playbooks/<dataset>.yaml
+#
+# where <dataset> is the quarantine table's last name segment — e.g.
+#   main.quarantine.silver_orders
+#     ->  /Volumes/.../remediation_playbooks/silver_orders.yaml
+#
+# DQX Studio uploads the file to that path; 03a_playbook_remediate reads it at
+# run time for that dataset. No bundle deploy to add / change a rule. A dataset
+# with no file there simply sends every failing row to the LLM agent (03).
+#
+# ---------------------------------------------------------------------------
+# For any pending quarantined row whose failed DQX rule matches an entry below
+# (and whose `where`, if set, matches), 03a applies the entry's `strategy`
+# deterministically and the LLM agent never sees that row. Strategy *functions*
+# are code (notebooks/lib/remediation_strategies.py / STRATEGY_REGISTRY); the
+# rule -> strategy -> params mapping is this file.
+#
+# Entry fields:
+#   rule_name    the EXACT DQX check name — the `.name` of the structs in the
+#                quarantine `_error` / `_warning` columns. Get the exact names
+#                from a dry run's 03_agent_curate output (signatures[].rules[].rule).
+#   priority     integer; lower runs first. The FIRST entry that matches a row
+#                wins — put reject_rows before dedupe_keep_latest.
+#   where        optional SQL boolean over the row's own data columns. Scopes the
+#                entry by value; one rule_name may have several entries.
+#   strategy     dedupe_keep_latest | standardize_value | fill_default | reject_rows
+#   params       per strategy (below)
+#   description  free text
+# ---------------------------------------------------------------------------
+
+playbooks:
+
+  # --- reject_rows :  drop every matched row (terminal — never re-validated,
+  #     never reingested, never seen by the agent). params: {reason?}
+  - rule_name: some_regex_check
+    priority: 10
+    where: "some_column rlike '^[A-Za-z]'"
+    strategy: reject_rows
+    params:
+      reason: "value is structurally invalid, not a formatting slip"
+    description: These values can't be recovered — drop the rows.
+
+  # --- dedupe_keep_latest :  row_number() OVER (PARTITION BY partition_by
+  #     ORDER BY order_by <order_direction>). rn=1 kept (-> curated, still
+  #     re-validated by 04); rn>1 dropped (-> resolved_duplicate, terminal).
+  #     params: {partition_by[], order_by, order_direction?, ci_columns?}
+  #       order_direction : 'desc' (keep newest, default) | 'asc' (keep oldest)
+  #       ci_columns      : subset of partition_by compared case-insensitively
+  - rule_name: some_uniqueness_check
+    priority: 20
+    strategy: dedupe_keep_latest
+    params:
+      partition_by: [key_col_a, key_col_b]
+      ci_columns: [key_col_b]
+      order_by: updated_at
+      order_direction: desc
+
+  # --- standardize_value :  patch one column with a named transform, then
+  #     re-validate. params: {column, transform}
+  #       transform : lower_trim | trim | upper_trim
+  - rule_name: some_format_check
+    priority: 30
+    strategy: standardize_value
+    params:
+      column: email
+      transform: lower_trim
+
+  # --- fill_default :  fill a null/missing column with a SQL expression, then
+  #     re-validate. params: {column, default_expr}
+  - rule_name: not_null_check_updated_at
+    priority: 40
+    strategy: fill_default
+    params:
+      column: updated_at
+      default_expr: "current_timestamp()"
+
+  # --- value-scoped routing :  same rule_name, different `where`. A row that
+  #     matches none of the entries' `where` falls through to the agent.
+  - rule_name: classification_check
+    priority: 50
+    where: "classification = 'Duplicate'"
+    strategy: dedupe_keep_latest
+    params:
+      partition_by: [customer_id]
+      order_by: created_at
+      order_direction: desc

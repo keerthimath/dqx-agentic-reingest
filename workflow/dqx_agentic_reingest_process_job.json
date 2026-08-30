@@ -1,0 +1,134 @@
+{
+  "name": "dqx-agentic-reingest-process",
+  "tags": { "application": "dqx", "component": "dqx-agentic-reingest" },
+  "max_concurrent_runs": 10,
+  "parameters": [
+    { "name": "quarantine_fqn", "default": "" },
+    { "name": "parent_run_id", "default": "" },
+    { "name": "dry_run", "default": "false" },
+    { "name": "reset_queue", "default": "false" }
+  ],
+  "environments": [
+    {
+      "environment_key": "dqx_agentic_reingest_env",
+      "spec": {
+        "client": "3",
+        "dependencies": [
+          "databricks-labs-dqx",
+          "/Volumes/main/artifacts/wheels/dqx_validator-1.1.1-py3-none-any.whl"
+        ]
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "triage",
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/02_triage",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "run_id": "{{job.parameters.parent_run_id}}",
+          "reset_queue": "{{job.parameters.reset_queue}}"
+        }
+      }
+    },
+    {
+      "task_key": "playbook_remediate",
+      "depends_on": [{ "task_key": "triage" }],
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/03a_playbook_remediate",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "playbook_dir": "/Volumes/main/dqx_studio/remediation_playbooks",
+          "lib_path": "/Workspace/dqx-agentic-reingest/notebooks/lib"
+        }
+      }
+    },
+    {
+      "task_key": "agent_curate",
+      "depends_on": [{ "task_key": "playbook_remediate" }],
+      "comment": "Only sees rows still 'pending' — anything with a documented playbook fix was already resolved deterministically and excluded.",
+      "environment_key": "dqx_agentic_reingest_env",
+      "retry_on_timeout": true,
+      "max_retries": 2,
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/03_agent_curate",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "model_endpoint": "system.ai.claude-sonnet-4-6",
+          "sample_size": "15",
+          "confidence_threshold": "0.8",
+          "policy_path": "/Workspace/dqx-agentic-reingest/config/agent_curation_policy.yaml"
+        }
+      }
+    },
+    {
+      "task_key": "confidence_gate",
+      "depends_on": [{ "task_key": "agent_curate" }],
+      "condition_task": {
+        "op": "GREATER_THAN_OR_EQUAL",
+        "left": "{{tasks.agent_curate.values.min_batch_confidence}}",
+        "right": "0.8"
+      }
+    },
+    {
+      "task_key": "apply_and_validate",
+      "depends_on": [{ "task_key": "confidence_gate", "outcome": "true" }],
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/04_apply_and_validate",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "env": "dev",
+          "rules_table": "main.dqx_studio.dq_quality_rules",
+          "lib_path": "/Workspace/dqx-agentic-reingest/notebooks/lib",
+          "confidence_threshold": "0.8",
+          "max_retries": "3"
+        }
+      }
+    },
+    {
+      "task_key": "reingest",
+      "depends_on": [{ "task_key": "apply_and_validate" }],
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/05_reingest",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "staged_table": "{{tasks.apply_and_validate.values.staged_table}}",
+          "silver_fqn": "{{tasks.apply_and_validate.values.silver_fqn}}",
+          "merge_key": "{{tasks.apply_and_validate.values.merge_key}}",
+          "max_retries": "3",
+          "dry_run": "{{job.parameters.dry_run}}",
+          "run_id": "{{job.parameters.parent_run_id}}"
+        }
+      }
+    },
+    {
+      "task_key": "audit_metrics",
+      "depends_on": [
+        { "task_key": "reingest" },
+        { "task_key": "confidence_gate", "outcome": "false" }
+      ],
+      "run_if": "AT_LEAST_ONE_SUCCESS",
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/06_audit_metrics",
+        "base_parameters": {
+          "quarantine_fqn": "{{job.parameters.quarantine_fqn}}",
+          "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+          "metrics_fqn": "main.dqx_studio.dq_summary_metrics",
+          "audit_fqn": "main.dqx_studio._dq_reingest_audit",
+          "run_id": "{{job.parameters.parent_run_id}}"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+# Policy for 03_agent_curate.py — the LLM fallback for DQX rules that have NO
+# entry in this dataset's remediation playbook YAML.
+#
+# Deterministic per-rule fixes (dedup, standardization, defaults) belong in the
+# per-dataset playbook YAML — 03a applies those first and the agent never sees
+# those rows. This file only governs what the agent does with what's left.
+#
+# See config/README.md for the full flow.
+
+# --------------------------------------------------------------------------- #
+# Decision policy — rendered verbatim into the model's system prompt.
+# --------------------------------------------------------------------------- #
+decision_policy:
+
+  fix: |
+    Exactly one transform from the allowed vocabulary per flagged column, when it
+    genuinely makes the value conform:
+      - typos / obvious character errors
+      - shifted columns (value clearly belongs in / came from an adjacent field)
+      - date & timestamp format normalization (parse a known format -> ISO)
+      - casing / whitespace / zero-padding
+      - regex-strippable prefixes or suffixes
+    The transform MUST change the value. Never propose a no-op (e.g. left_pad on a
+    string already at the target length, or a transform that cannot remove an
+    alphabetic prefix).
+
+  reject: |
+    Drop the row — terminal, never reingested. Choose reject when:
+      - a required value is empty / null and cannot be derived from the row
+      - the value cannot satisfy the rule's regex or allowed-list and no allowed
+        transform recovers it
+      - the row is in a segment the business excludes (e.g. a check that flags
+        records outside the in-scope region or product line)
+
+  escalate: |
+    Everything not clearly fix or reject:
+      - cross-table / referential-integrity mismatches that the cross_table_probe
+        below did not resolve
+      - a value that needs a lookup table to correct
+      - true duplicates with no deterministic tie-breaker (these should instead
+        get a dedup entry in remediation_playbook.yaml — flag that in reasoning)
+      - anything ambiguous
+
+# --------------------------------------------------------------------------- #
+# Transform vocabulary — IMPLEMENTED in notebooks/03_agent_curate.py
+# (build_col_expr / ALLOWED_TRANSFORMS). Listed here for reference only.
+# To add one: add it to build_col_expr, then to this list.
+# --------------------------------------------------------------------------- #
+allowed_transforms:
+  - trim
+  - lower
+  - upper
+  - lower_trim
+  - upper_trim
+  - regexp_replace      # {pattern, replacement}
+  - regexp_extract      # {pattern, group}
+  - to_date             # {from_format}
+  - to_timestamp        # {from_format}
+  - left_pad            # {length, pad}
+  - right_pad           # {length, pad}
+  - substring           # {pos, len}
+  - set_default         # {value}
+  - set_null
+
+# --------------------------------------------------------------------------- #
+# Cross-table probe.
+# For a signature whose DQX check function is `sql_query` (a cross-table
+# comparison), 03 first tests — on a SAMPLE — whether normalizing the compared
+# column removes the mismatch against the other table. If a normalization
+# resolves >= resolve_threshold of the sample it is proposed as the fix;
+# otherwise the signature is escalated. The LLM is not called for these.
+# --------------------------------------------------------------------------- #
+cross_table_probe:
+  sample_rows: 200
+  resolve_threshold: 0.9
+  normalizations: [trim, lower_trim, upper_trim]
+  rules:
+    # key = exact DQX check name of a cross-table (sql_query) rule
+    shipments_code_mismatch_with_orders:
+      compare_column: code
+      other_table: main.silver.orders
+      join_keys: [order_id]      # this.order_id == other.order_id (compared as strings)

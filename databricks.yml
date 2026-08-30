@@ -1,0 +1,58 @@
+# Databricks Asset Bundle config for the dqx-agentic-reingest system.
+# Deploy with: databricks bundle deploy -t dev
+# Run with:    databricks bundle run dqx_agentic_reingest -t dev
+#
+# Environment-specific settings (workspace hosts, service principals, catalog
+# names, permission groups) live in one `target.<name>.yml` file per env, each
+# NOT tracked in git. On a fresh checkout, copy the template per env you need:
+#   cp targets.example.yml target.dev.yml     # then edit
+# The `target.*.yml` include glob deliberately does NOT match the plural
+# `targets.example.yml` template.
+
+bundle:
+  name: dqx-agentic-reingest
+
+include:
+  - resources/*.yml
+  - target.*.yml           # git-ignored, one per env; see targets.example.yml
+
+variables:
+  env:
+    description: dqx-validator env key — selects the catalog/rules schema from the wheel's tables.yaml (set per target in target.<name>.yml)
+  catalog:
+    description: Unity Catalog catalog holding the quarantine, Silver, and governance tables — must match dqx-validator's catalog_template for this env (set per target in target.<name>.yml)
+  quarantine_schema:
+    description: Schema dqx-validator writes quarantine tables into (its quarantine_schema)
+    default: quarantine
+  rules_schema:
+    description: Schema holding the DQX Studio rules tables in var.catalog (dqx_studio for prod, dqx_app for non-prod)
+    default: dqx_studio
+  governance_schema:
+    description: Schema for the _dq_review_queue / _dq_reingest_audit / dq_summary_metrics tables + the remediation_playbooks Volume. Commonly the same as rules_schema (co-located with DQX Studio) — set per target.
+    default: dqx_app
+  playbook_volume:
+    description: Volume name (in governance_schema) holding the per-dataset remediation playbook YAMLs
+    default: remediation_playbooks
+  model_serving_endpoint:
+    description: Model the agent calls via ai_query() — a serving-endpoint name or a system.ai.* foundation model
+    default: system.ai.claude-sonnet-4-6
+  confidence_threshold:
+    description: Minimum agent confidence to auto-curate instead of routing to human review
+    default: "0.8"
+  max_retries:
+    description: Max reingest attempts before a row auto-escalates to human review
+    default: "3"
+
+# Notebooks and config are deployed relative to this bundle root — referenced
+# from resources/dqx_agentic_reingest_job.yml via ${workspace.file_path}.
+#
+# libs/dqx-validator is the standalone quarantine library (the "write" side).
+# The bundle builds it into a wheel; the job installs it as a serverless
+# dependency. It can also be installed on its own, without this bundle.
+artifacts:
+  dqx_validator:
+    type: whl
+    path: ./libs/dqx-validator
+    build: python -m build --wheel
+
+# targets: defined in target.<name>.yml files (git-ignored).

@@ -1,0 +1,25 @@
+# Python build artifacts
+**/build/
+**/dist/
+**/*.egg-info/
+**/__pycache__/
+*.pyc
+
+# Databricks
+.databricks/
+.databricks-login.json
+
+# Environment-specific bundle config (hosts, service principals, catalogs) —
+# one file per env. Copy targets.example.yml -> target.<name>.yml and fill in.
+target.*.yml
+
+# Claude Code local pointer — canonical instructions are tracked in AGENT.md
+CLAUDE.md
+
+# Local env
+.venv/
+.env
+
+# OS
+.DS_Store
+config/remediation_playbooks/

@@ -1,0 +1,56 @@
+{
+  "name": "dqx-agentic-reingest",
+  "tags": { "application": "dqx", "component": "dqx-agentic-reingest" },
+  "max_concurrent_runs": 1,
+  "parameters": [
+    { "name": "dry_run", "default": "false" },
+    { "name": "reset_queue", "default": "false" }
+  ],
+  "environments": [
+    {
+      "environment_key": "dqx_agentic_reingest_env",
+      "spec": { "client": "3", "dependencies": ["databricks-labs-dqx"] }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "discover",
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/01_discover_quarantine_tables",
+        "base_parameters": {
+          "catalog": "main",
+          "quarantine_schema": "quarantine",
+          "table_prefix": ""
+        }
+      }
+    },
+    {
+      "task_key": "process_each_quarantine_table",
+      "depends_on": [{ "task_key": "discover" }],
+      "for_each_task": {
+        "inputs": "{{tasks.discover.values.quarantine_fqns}}",
+        "concurrency": 4,
+        "task": {
+          "task_key": "process_fqn",
+          "run_job_task": {
+            "job_id": 0,
+            "job_parameters": {
+              "quarantine_fqn": "{{input}}",
+              "parent_run_id": "{{job.run_id}}",
+              "dry_run": "{{job.parameters.dry_run}}",
+              "reset_queue": "{{job.parameters.reset_queue}}"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "trigger": {
+    "table_update": {
+      "table_names": ["main.quarantine.*"],
+      "min_time_between_triggers_seconds": 300,
+      "wait_after_last_change_seconds": 60
+    }
+  }
+}

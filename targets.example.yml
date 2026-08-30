@@ -1,0 +1,70 @@
+# TEMPLATE for the per-environment bundle config.
+#
+# One file per environment, named  target.<name>.yml  (singular — one target
+# per file). Each is git-ignored (.gitignore: `target.*.yml`) so workspace
+# hosts, service principals, catalogs and permission groups stay out of the
+# repo. `databricks.yml` pulls them in with `include: [target.*.yml]`; that
+# glob does NOT match this plural `targets.example.yml`.
+#
+# To add an environment:
+#   cp targets.example.yml target.<name>.yml
+#   # then keep ONLY that env's block and fill in the REPLACE_WITH_* values
+#
+# Notes:
+#   - the key under `targets:` is the name you pass to
+#     `databricks bundle deploy -t <name>`.
+#   - `var.env` is a dqx-validator env key; `var.catalog` must equal
+#     dqx-validator's catalog_template for it (<catalog>).
+#   - permission `level` is one of: CAN_MANAGE | CAN_RUN | CAN_VIEW.
+
+targets:
+
+  # ---- target.dev.yml ---------------------------------------------------
+  dev:
+    mode: development                    # [dev me] prefixing; schedules/triggers paused
+    default: true
+    workspace:
+      host: https://REPLACE_WITH_DEV_WORKSPACE.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      env: dev
+      catalog: REPLACE_WITH_DEV_CATALOG  # e.g. main
+      rules_schema: dqx_app
+      governance_schema: dqx_app   # co-locate the reingest tables with the DQX Studio rules
+
+  # ---- target.qa.yml -------------------------------------------------
+  qa:
+    mode: production                     # stable names — exercises the prod deploy path
+    presets:
+      trigger_pause_status: PAUSED       # unpause after a clean dry run
+    workspace:
+      host: https://REPLACE_WITH_QA_WORKSPACE.cloud.databricks.com
+      root_path: /Workspace/${bundle.name}/${bundle.target}
+    # run_as: deploying user by default. Uncomment for a shared SP:
+    # run_as:
+    #   service_principal_name: REPLACE_WITH_QA_SP_APPLICATION_ID
+    variables:
+      env: qa
+      catalog: REPLACE_WITH_QA_CATALOG   # e.g. main
+      rules_schema: dqx_app
+      governance_schema: dqx_app
+    permissions:
+      - group_name: REPLACE_WITH_QA_GROUP
+        level: CAN_MANAGE
+
+  # ---- target.prod.yml ---------------------------------------------------
+  prod:
+    mode: production
+    workspace:
+      host: https://REPLACE_WITH_PROD_WORKSPACE.cloud.databricks.com
+      root_path: /Workspace/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: REPLACE_WITH_PROD_SP_APPLICATION_ID
+    variables:
+      env: prod
+      catalog: REPLACE_WITH_PROD_CATALOG  # e.g. main
+      rules_schema: dqx_studio
+      governance_schema: dqx_studio
+    permissions:
+      - group_name: REPLACE_WITH_PROD_GROUP
+        level: CAN_MANAGE

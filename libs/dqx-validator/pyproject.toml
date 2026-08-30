@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dqx-validator"
+version = "1.1.1"
+description = "Apply approved DQX Studio rules to a DataFrame and quarantine failing rows."
+requires-python = ">=3.10"
+dependencies = [
+    "databricks-labs-dqx",
+    "databricks-sdk",
+    "pyyaml"
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = ["dqx_validator"]
+
+[tool.setuptools.package-data]
+dqx_validator = ["*.yaml"]

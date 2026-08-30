@@ -1,0 +1,56 @@
+{
+  "name": "dqx-dry-run-report",
+  "tags": { "application": "dqx", "component": "dqx-agentic-reingest" },
+  "max_concurrent_runs": 1,
+  "environments": [
+    {
+      "environment_key": "dqx_agentic_reingest_env",
+      "spec": {
+        "client": "3",
+        "dependencies": [
+          "databricks-labs-dqx",
+          "/Volumes/main/artifacts/wheels/dqx_validator-1.1.1-py3-none-any.whl"
+        ]
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "discover",
+      "environment_key": "dqx_agentic_reingest_env",
+      "notebook_task": {
+        "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/01_discover_quarantine_tables",
+        "base_parameters": {
+          "catalog": "main",
+          "quarantine_schema": "quarantine",
+          "table_prefix": ""
+        }
+      }
+    },
+    {
+      "task_key": "dry_run_each_quarantine_table",
+      "depends_on": [{ "task_key": "discover" }],
+      "for_each_task": {
+        "inputs": "{{tasks.discover.values.quarantine_fqns}}",
+        "concurrency": 4,
+        "task": {
+          "task_key": "dry_run_fqn",
+          "environment_key": "dqx_agentic_reingest_env",
+          "notebook_task": {
+            "notebook_path": "/Workspace/dqx-agentic-reingest/notebooks/07_dry_run_report",
+            "base_parameters": {
+              "quarantine_fqn": "{{input}}",
+              "review_queue_fqn": "main.dqx_studio._dq_review_queue",
+              "report_fqn": "main.dqx_studio._dq_dry_run_report",
+              "env": "dev",
+              "rules_table": "main.dqx_studio.dq_quality_rules",
+              "playbook_dir": "/Volumes/main/dqx_studio/remediation_playbooks",
+          "lib_path": "/Workspace/dqx-agentic-reingest/notebooks/lib",
+                  "run_id": "{{job.run_id}}"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

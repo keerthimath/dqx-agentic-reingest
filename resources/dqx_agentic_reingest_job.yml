@@ -1,0 +1,281 @@
+# Parent job for the bundle declared in ../databricks.yml.
+#
+# Databricks For Each tasks wrap a SINGLE task, not a subgraph, so the
+# per-quarantine-table pipeline (triage -> playbook -> agent -> gate ->
+# validate -> reingest -> audit) lives in the child job below and the parent
+# fans out to it with one run_job_task per FQN.
+#
+# Compute is serverless — no job_clusters block. Each notebook task pins the
+# shared serverless environment so databricks-labs-dqx and the dqx-validator
+# wheel are importable.
+
+resources:
+  jobs:
+
+    # --------------------------------------------------- one-time env setup
+    # Run once per target after the first deploy (and after any governance
+    # DDL change): databricks bundle run dqx_setup_governance -t <target>
+    dqx_setup_governance:
+      name: dqx-setup-governance
+      tags:
+        application: dqx
+        component: dqx-agentic-reingest
+      max_concurrent_runs: 1
+      environments:
+        - environment_key: setup_env
+          spec:
+            client: "3"
+      tasks:
+        - task_key: setup
+          environment_key: setup_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/00_setup_governance
+            base_parameters:
+              catalog: ${var.catalog}
+              governance_schema: ${var.governance_schema}
+              playbook_volume: ${var.playbook_volume}
+
+    # ------------------------------------------------------------------ parent
+    dqx_agentic_reingest:
+      name: dqx-agentic-reingest
+      tags:
+        application: dqx
+        component: dqx-agentic-reingest
+
+      environments:
+        - environment_key: dqx_agentic_reingest_env
+          spec:
+            client: "3"
+            dependencies:
+              - databricks-labs-dqx
+              # Built from libs/dqx-validator by the artifacts block in
+              # ../databricks.yml; DAB uploads it and rewrites this path.
+              - ../libs/dqx-validator/dist/*.whl
+
+      # dry_run=true  -> run the whole pipeline but hold the Silver MERGE in 05.
+      # reset_queue=true -> 02 drops this FQN's _dq_review_queue rows first and
+      #   re-triages from scratch (reprocess a table cleanly).
+      #   databricks bundle run dqx_agentic_reingest ... --params dry_run=true,reset_queue=true
+      parameters:
+        - name: dry_run
+          default: "false"
+        - name: reset_queue
+          default: "false"
+
+      tasks:
+        - task_key: discover
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/01_discover_quarantine_tables
+            base_parameters:
+              catalog: ${var.catalog}
+              quarantine_schema: ${var.quarantine_schema}
+              table_prefix: ""
+
+        - task_key: process_each_quarantine_table
+          depends_on:
+            - task_key: discover
+          for_each_task:
+            inputs: "{{tasks.discover.values.quarantine_fqns}}"
+            concurrency: 4
+            task:
+              task_key: process_fqn
+              run_job_task:
+                job_id: ${resources.jobs.dqx_agentic_reingest_process.id}
+                job_parameters:
+                  quarantine_fqn: "{{input}}"
+                  parent_run_id: "{{job.run_id}}"
+                  dry_run: "{{job.parameters.dry_run}}"
+                  reset_queue: "{{job.parameters.reset_queue}}"
+
+      # A job takes exactly one of trigger / schedule / continuous. Table-update
+      # trigger is the primary design; if your workspace tier doesn't support
+      # table triggers, replace this whole block with:
+      #   schedule:
+      #     quartz_cron_expression: "0 0 * * * ?"
+      #     timezone_id: UTC
+      #     pause_status: UNPAUSED
+      trigger:
+        table_update:
+          table_names:
+            - "${var.catalog}.${var.quarantine_schema}.*"
+          min_time_between_triggers_seconds: 300
+          wait_after_last_change_seconds: 60
+
+      max_concurrent_runs: 1
+
+    # ------------------------------------------------------- child (per FQN)
+    dqx_agentic_reingest_process:
+      name: dqx-agentic-reingest-process
+      tags:
+        application: dqx
+        component: dqx-agentic-reingest
+
+      # Only ever invoked by the parent's For Each — no schedule / trigger.
+      max_concurrent_runs: 10
+
+      parameters:
+        - name: quarantine_fqn
+          default: ""
+        - name: parent_run_id
+          default: ""
+        - name: dry_run
+          default: "false"
+        - name: reset_queue
+          default: "false"
+
+      environments:
+        - environment_key: dqx_agentic_reingest_env
+          spec:
+            client: "3"
+            dependencies:
+              - databricks-labs-dqx
+              - ../libs/dqx-validator/dist/*.whl
+
+      tasks:
+        - task_key: triage
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/02_triage
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              run_id: "{{job.parameters.parent_run_id}}"
+              reset_queue: "{{job.parameters.reset_queue}}"
+
+        - task_key: playbook_remediate
+          depends_on:
+            - task_key: triage
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/03a_playbook_remediate
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              playbook_dir: /Volumes/${var.catalog}/${var.governance_schema}/${var.playbook_volume}
+              lib_path: ${workspace.file_path}/notebooks/lib
+
+        - task_key: agent_curate
+          depends_on:
+            - task_key: playbook_remediate
+          environment_key: dqx_agentic_reingest_env
+          retry_on_timeout: true
+          max_retries: 2
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/03_agent_curate
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              model_endpoint: ${var.model_serving_endpoint}
+              sample_size: "15"
+              confidence_threshold: ${var.confidence_threshold}
+              policy_path: ${workspace.file_path}/config/agent_curation_policy.yaml
+
+        - task_key: confidence_gate
+          depends_on:
+            - task_key: agent_curate
+          condition_task:
+            op: GREATER_THAN_OR_EQUAL
+            left: "{{tasks.agent_curate.values.min_batch_confidence}}"
+            right: ${var.confidence_threshold}
+
+        - task_key: apply_and_validate
+          depends_on:
+            - task_key: confidence_gate
+              outcome: "true"
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/04_apply_and_validate
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              env: ${var.env}
+              rules_table: ${var.catalog}.${var.rules_schema}.dq_quality_rules
+              lib_path: ${workspace.file_path}/notebooks/lib
+              confidence_threshold: ${var.confidence_threshold}
+              max_retries: ${var.max_retries}
+
+        - task_key: reingest
+          depends_on:
+            - task_key: apply_and_validate
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/05_reingest
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              staged_table: "{{tasks.apply_and_validate.values.staged_table}}"
+              silver_fqn: "{{tasks.apply_and_validate.values.silver_fqn}}"
+              merge_key: "{{tasks.apply_and_validate.values.merge_key}}"
+              max_retries: ${var.max_retries}
+              dry_run: "{{job.parameters.dry_run}}"
+              run_id: "{{job.parameters.parent_run_id}}"
+
+        - task_key: audit_metrics
+          depends_on:
+            - task_key: reingest
+            - task_key: confidence_gate
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/06_audit_metrics
+            base_parameters:
+              quarantine_fqn: "{{job.parameters.quarantine_fqn}}"
+              review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+              metrics_fqn: ${var.catalog}.${var.governance_schema}.dq_summary_metrics
+              audit_fqn: ${var.catalog}.${var.governance_schema}._dq_reingest_audit
+              run_id: "{{job.parameters.parent_run_id}}"
+
+    # ------------------------------------------------ dry-run estimate (no writes)
+    # Read-only: for each quarantine table, estimates how many rows would flow
+    # back into Silver (playbook path is computed for real incl. re-validation;
+    # the agent path is reported as a count only — the model is never called).
+    # Appends to <governance_schema>._dq_dry_run_report and writes nothing else.
+    #   databricks bundle run dqx_dry_run -t dev
+    dqx_dry_run:
+      name: dqx-dry-run-report
+      tags:
+        application: dqx
+        component: dqx-agentic-reingest
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: dqx_agentic_reingest_env
+          spec:
+            client: "3"
+            dependencies:
+              - databricks-labs-dqx
+              - ../libs/dqx-validator/dist/*.whl
+
+      tasks:
+        - task_key: discover
+          environment_key: dqx_agentic_reingest_env
+          notebook_task:
+            notebook_path: ${workspace.file_path}/notebooks/01_discover_quarantine_tables
+            base_parameters:
+              catalog: ${var.catalog}
+              quarantine_schema: ${var.quarantine_schema}
+              table_prefix: ""
+
+        - task_key: dry_run_each_quarantine_table
+          depends_on:
+            - task_key: discover
+          for_each_task:
+            inputs: "{{tasks.discover.values.quarantine_fqns}}"
+            concurrency: 4
+            task:
+              task_key: dry_run_fqn
+              environment_key: dqx_agentic_reingest_env
+              notebook_task:
+                notebook_path: ${workspace.file_path}/notebooks/07_dry_run_report
+                base_parameters:
+                  quarantine_fqn: "{{input}}"
+                  review_queue_fqn: ${var.catalog}.${var.governance_schema}._dq_review_queue
+                  report_fqn: ${var.catalog}.${var.governance_schema}._dq_dry_run_report
+                  env: ${var.env}
+                  rules_table: ${var.catalog}.${var.rules_schema}.dq_quality_rules
+                  playbook_dir: /Volumes/${var.catalog}/${var.governance_schema}/${var.playbook_volume}
+                  lib_path: ${workspace.file_path}/notebooks/lib
+                  run_id: "{{job.run_id}}"
